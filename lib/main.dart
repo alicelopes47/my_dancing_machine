@@ -14,7 +14,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Dance Macaahine',
+      title: 'My dance machine',
       theme: ThemeData.dark(),
       home: const VideoPlayerScreen(),
     );
