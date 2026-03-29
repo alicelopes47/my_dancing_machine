@@ -30,6 +30,11 @@ class VideoPlayerScreen extends StatefulWidget {
 
 class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   VideoPlayerController? _controller;
+  VideoCropSettings? _cropSettings;
+  final List<double> _speedSteps = [0.35, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+
+  double _playbackSpeed = 1.0;
+  int _speedStepIndex = -1;
   bool isFullscreen = false;
 
   bool isLoopActive = false;
@@ -43,15 +48,26 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
     final result = await FilePicker.platform.pickFiles(type: FileType.video);
     if (result != null && result.files.single.path != null) {
       final file = File(result.files.single.path!);
-      _initializeVideo(file);
+      final cropSettings = await Navigator.push<VideoCropSettings>(
+        context,
+        MaterialPageRoute(builder: (_) => VideoCropEditorScreen(file: file)),
+      );
+
+      if (cropSettings != null) {
+        _initializeVideo(file, cropSettings);
+      }
     }
   }
 
-  void _initializeVideo(File file) async {
+  void _initializeVideo(File file, VideoCropSettings cropSettings) async {
     _controller?.dispose();
     _controller = VideoPlayerController.file(file);
+    _cropSettings = cropSettings;
+    _playbackSpeed = 1.0;
+    _speedStepIndex = -1;
 
     await _controller!.initialize();
+    await _controller!.setPlaybackSpeed(_playbackSpeed);
     setState(() {});
 
     _controller!.play();
@@ -121,8 +137,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
           );
         }
       });
-    } else {
-      _toggleFullscreen();
     }
   }
 
@@ -130,6 +144,90 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
     setState(() {
       isFullscreen = !isFullscreen;
     });
+  }
+
+  Future<void> _cyclePlaybackSpeed() async {
+    if (_controller == null || !_controller!.value.isInitialized) {
+      return;
+    }
+
+    final nextIndex = (_speedStepIndex + 1) % _speedSteps.length;
+    final nextSpeed = _speedSteps[nextIndex];
+
+    await _controller!.setPlaybackSpeed(nextSpeed);
+
+    setState(() {
+      _speedStepIndex = nextIndex;
+      _playbackSpeed = nextSpeed;
+    });
+  }
+
+  double _maxOffsetFactorForScale(double scale) {
+    return (scale - 1) / 2;
+  }
+
+  Widget _buildVideoViewport() {
+    if (_controller == null || !_controller!.value.isInitialized) {
+      return const Center(child: Text("Nenhum video selecionado"));
+    }
+
+    final settings =
+        _cropSettings ??
+        VideoCropSettings(
+          scale: 1,
+          offsetXFactor: 0,
+          offsetYFactor: 0,
+          aspectRatio: _controller!.value.aspectRatio,
+        );
+
+    final safeScale = settings.scale.clamp(1.0, 5.0);
+    final maxOffsetFactor = _maxOffsetFactorForScale(safeScale);
+    final safeOffsetX = settings.offsetXFactor.clamp(
+      -maxOffsetFactor,
+      maxOffsetFactor,
+    );
+    final safeOffsetY = settings.offsetYFactor.clamp(
+      -maxOffsetFactor,
+      maxOffsetFactor,
+    );
+    final screenAspectRatio =
+        MediaQuery.of(context).size.width / MediaQuery.of(context).size.height;
+    final viewportAspectRatio = isFullscreen
+        ? screenAspectRatio
+        : settings.aspectRatio;
+
+    return Center(
+      child: AspectRatio(
+        aspectRatio: viewportAspectRatio,
+        child: ClipRect(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final matrix = Matrix4.identity()
+                ..translate(
+                  safeOffsetX * constraints.maxWidth,
+                  safeOffsetY * constraints.maxHeight,
+                )
+                ..scale(safeScale);
+
+              return Transform(
+                alignment: Alignment.center,
+                transform: matrix,
+                child: SizedBox.expand(
+                  child: FittedBox(
+                    fit: BoxFit.cover,
+                    child: SizedBox(
+                      width: _controller!.value.size.width,
+                      height: _controller!.value.size.height,
+                      child: VideoPlayer(_controller!),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ),
+    );
   }
 
   @override
@@ -154,11 +252,40 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
               child: _controller != null && _controller!.value.isInitialized
                   ? Stack(
                       children: [
-                        Center(
-                          // <-- Adicione este Center
-                          child: AspectRatio(
-                            aspectRatio: _controller!.value.aspectRatio,
-                            child: VideoPlayer(_controller!),
+                        _buildVideoViewport(),
+                        Positioned(
+                          top: 8,
+                          left: 8,
+                          child: ElevatedButton(
+                            onPressed: _cyclePlaybackSpeed,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.black54,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 8,
+                              ),
+                              minimumSize: Size.zero,
+                            ),
+                            child: Text(
+                              '${_playbackSpeed.toStringAsFixed(2)}x',
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          top: 8,
+                          right: 8,
+                          child: IconButton(
+                            icon: Icon(
+                              isFullscreen
+                                  ? Icons.fullscreen_exit
+                                  : Icons.fullscreen,
+                              color: Colors.white,
+                            ),
+                            tooltip: isFullscreen
+                                ? 'Sair da tela cheia'
+                                : 'Tela cheia',
+                            onPressed: _toggleFullscreen,
                           ),
                         ),
                         Positioned(
@@ -175,76 +302,43 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                             ),
                           ),
                         ),
-                        Positioned(
-                          bottom: 30,
-                          left: 0,
-                          right: 0,
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              IconButton(
-                                icon: Icon(
-                                  _controller!.value.isPlaying
-                                      ? Icons.loop
-                                      : Icons.play_arrow,
-                                  color: Colors.white,
-                                  size: 30,
-                                ),
-                                onPressed: () {
-                                  setState(() {
-                                    _controller!.value.isPlaying
-                                        ? _controller!.pause()
-                                        : _controller!.play();
-                                  });
-                                },
-                              ),
-                              IconButton(
-                                icon: Icon(
-                                  Icons.replay_10,
-                                  color: Colors.white,
-                                ),
-                                onPressed: () {
-                                  final pos = _controller!.value.position;
-                                  _controller!.seekTo(
-                                    pos - const Duration(seconds: 10),
-                                  );
-                                },
-                              ),
-                              IconButton(
-                                icon: Icon(
-                                  Icons.forward_10,
-                                  color: Colors.white,
-                                ),
-                                onPressed: () {
-                                  final pos = _controller!.value.position;
-                                  _controller!.seekTo(
-                                    pos + const Duration(seconds: 10),
-                                  );
-                                },
-                              ),
-                            ],
-                          ),
-                        ),
                       ],
                     )
-                  : const Center(child: Text("Nenhum vídeo selecionado")),
+                  : const Center(child: Text("Nenhum video selecionado")),
             ),
           ),
           if (!isFullscreen) ...[
             const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                ElevatedButton(
-                  onPressed: _pickVideo,
-                  child: const Text("Selecionar vídeo"),
-                ),
-                const SizedBox(width: 16),
-                ElevatedButton(
-                  onPressed: _toggleLoop,
-                  child: const Text("Loop"),
-                ),
-              ],
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: GridView.count(
+                crossAxisCount: 2,
+                childAspectRatio: 3.2,
+                mainAxisSpacing: 10,
+                crossAxisSpacing: 10,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                children: [
+                  ElevatedButton(
+                    onPressed: _pickVideo,
+                    child: const Text("Selecionar video"),
+                  ),
+                  ElevatedButton(
+                    onPressed: _toggleLoop,
+                    child: const Text("Loop"),
+                  ),
+                  ElevatedButton(
+                    onPressed: _cyclePlaybackSpeed,
+                    child: Text(
+                      "Velocidade ${_playbackSpeed.toStringAsFixed(2)}x",
+                    ),
+                  ),
+                  ElevatedButton(
+                    onPressed: _toggleFullscreen,
+                    child: const Text("Tela cheia"),
+                  ),
+                ],
+              ),
             ),
           ],
         ],
@@ -281,10 +375,297 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                           : Icons.play_arrow,
                     ),
                   ),
+                  FloatingActionButton(
+                    onPressed: _toggleFullscreen,
+                    heroTag: 'fullscreen_button',
+                    child: Icon(
+                      isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
+                    ),
+                  ),
                 ],
               )
             : null,
       ),
     );
   }
+}
+
+class VideoCropSettings {
+  const VideoCropSettings({
+    required this.scale,
+    required this.offsetXFactor,
+    required this.offsetYFactor,
+    required this.aspectRatio,
+  });
+
+  final double scale;
+  final double offsetXFactor;
+  final double offsetYFactor;
+  final double aspectRatio;
+}
+
+class VideoCropEditorScreen extends StatefulWidget {
+  const VideoCropEditorScreen({super.key, required this.file});
+
+  final File file;
+
+  @override
+  State<VideoCropEditorScreen> createState() => _VideoCropEditorScreenState();
+}
+
+class _VideoCropEditorScreenState extends State<VideoCropEditorScreen> {
+  late final VideoPlayerController _previewController;
+  final TransformationController _transformController =
+      TransformationController();
+
+  double _selectedAspectRatio = 9 / 16;
+  double _currentScale = 1;
+  Size _viewportSize = Size.zero;
+
+  List<_AspectRatioOption> get _aspectRatioOptions {
+    final originalAspect = _previewController.value.aspectRatio;
+    return [
+      _AspectRatioOption(label: 'Original', ratio: originalAspect),
+      const _AspectRatioOption(label: '9:16', ratio: 9 / 16),
+      const _AspectRatioOption(label: '1:1', ratio: 1),
+      const _AspectRatioOption(label: '4:5', ratio: 4 / 5),
+      const _AspectRatioOption(label: '16:9', ratio: 16 / 9),
+    ];
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _previewController = VideoPlayerController.file(widget.file)
+      ..setLooping(true)
+      ..initialize().then((_) {
+        if (!mounted) {
+          return;
+        }
+
+        setState(() {
+          _selectedAspectRatio = _previewController.value.aspectRatio;
+        });
+        _previewController.play();
+      });
+    _transformController.addListener(_onTransformChanged);
+  }
+
+  void _onTransformChanged() {
+    final newScale = _transformController.value.getMaxScaleOnAxis().clamp(
+      1.0,
+      5.0,
+    );
+    if ((newScale - _currentScale).abs() > 0.01) {
+      setState(() {
+        _currentScale = newScale;
+      });
+    }
+  }
+
+  void _resetTransform() {
+    _transformController.value = Matrix4.identity();
+    setState(() {
+      _currentScale = 1;
+    });
+  }
+
+  double _maxOffsetFactorForScale(double scale) {
+    return (scale - 1) / 2;
+  }
+
+  void _setScale(double newScale) {
+    final matrix = _transformController.value;
+    var translationX = matrix.storage[12];
+    var translationY = matrix.storage[13];
+    final maxOffsetFactor = _maxOffsetFactorForScale(newScale);
+
+    if (_viewportSize != Size.zero) {
+      final maxTranslateX = _viewportSize.width * maxOffsetFactor;
+      final maxTranslateY = _viewportSize.height * maxOffsetFactor;
+      translationX = translationX.clamp(-maxTranslateX, maxTranslateX);
+      translationY = translationY.clamp(-maxTranslateY, maxTranslateY);
+    }
+
+    _transformController.value = Matrix4.identity()
+      ..translate(translationX, translationY)
+      ..scale(newScale);
+
+    setState(() {
+      _currentScale = newScale;
+    });
+  }
+
+  void _confirmCrop() {
+    if (_viewportSize == Size.zero) {
+      Navigator.pop(context);
+      return;
+    }
+
+    final matrix = _transformController.value;
+    final scale = matrix.getMaxScaleOnAxis().clamp(1.0, 5.0);
+    final maxOffsetFactor = _maxOffsetFactorForScale(scale);
+    final offsetXFactor = (matrix.storage[12] / _viewportSize.width).clamp(
+      -maxOffsetFactor,
+      maxOffsetFactor,
+    );
+    final offsetYFactor = (matrix.storage[13] / _viewportSize.height).clamp(
+      -maxOffsetFactor,
+      maxOffsetFactor,
+    );
+
+    final settings = VideoCropSettings(
+      scale: scale,
+      offsetXFactor: offsetXFactor,
+      offsetYFactor: offsetYFactor,
+      aspectRatio: _selectedAspectRatio,
+    );
+
+    Navigator.pop(context, settings);
+  }
+
+  @override
+  void dispose() {
+    _transformController.removeListener(_onTransformChanged);
+    _transformController.dispose();
+    _previewController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Ajustar enquadramento')),
+      body: _previewController.value.isInitialized
+          ? SafeArea(
+              child: Column(
+                children: [
+                  Expanded(
+                    child: Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: AspectRatio(
+                          aspectRatio: _selectedAspectRatio,
+                          child: ClipRect(
+                            child: LayoutBuilder(
+                              builder: (context, constraints) {
+                                _viewportSize = Size(
+                                  constraints.maxWidth,
+                                  constraints.maxHeight,
+                                );
+
+                                return InteractiveViewer(
+                                  transformationController:
+                                      _transformController,
+                                  minScale: 1,
+                                  maxScale: 5,
+                                  boundaryMargin: const EdgeInsets.all(
+                                    double.infinity,
+                                  ),
+                                  child: SizedBox.expand(
+                                    child: FittedBox(
+                                      fit: BoxFit.cover,
+                                      child: SizedBox(
+                                        width:
+                                            _previewController.value.size.width,
+                                        height: _previewController
+                                            .value
+                                            .size
+                                            .height,
+                                        child: VideoPlayer(_previewController),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  SingleChildScrollView(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Column(
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          child: Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: [
+                              for (final option in _aspectRatioOptions)
+                                ChoiceChip(
+                                  label: Text(option.label),
+                                  selected:
+                                      (_selectedAspectRatio - option.ratio)
+                                          .abs() <
+                                      0.001,
+                                  onSelected: (_) {
+                                    setState(() {
+                                      _selectedAspectRatio = option.ratio;
+                                    });
+                                    _resetTransform();
+                                  },
+                                ),
+                            ],
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Row(
+                            children: [
+                              const Text('Zoom'),
+                              Expanded(
+                                child: Slider(
+                                  value: _currentScale,
+                                  min: 1,
+                                  max: 5,
+                                  onChanged: _setScale,
+                                ),
+                              ),
+                              IconButton(
+                                onPressed: _resetTransform,
+                                icon: const Icon(Icons.refresh),
+                                tooltip: 'Resetar',
+                              ),
+                            ],
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: OutlinedButton(
+                                  onPressed: () => Navigator.pop(context),
+                                  child: const Text('Cancelar'),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: ElevatedButton(
+                                  onPressed: _confirmCrop,
+                                  child: const Text('Usar enquadramento'),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            )
+          : const Center(child: CircularProgressIndicator()),
+    );
+  }
+}
+
+class _AspectRatioOption {
+  const _AspectRatioOption({required this.label, required this.ratio});
+
+  final String label;
+  final double ratio;
 }
